@@ -27,6 +27,11 @@ jobs:
         shell: bash
         run: |
           composer install --no-interaction --no-progress --prefer-dist
+      - name: "Laravel: .env és alkalmazáskulcs"
+        shell: bash
+        run: |
+          [ -f .env ] || cp .env.example .env 2> /dev/null || printf 'APP_KEY=\n' > .env
+          php artisan key:generate --force --no-interaction
       - name: "PHP-tesztek (composer run-script test)"
         shell: bash
         run: |
