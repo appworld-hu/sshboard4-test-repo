@@ -1,0 +1,8 @@
+# Written by sshboard: Dependabot opens a pull request when a GitHub Action the
+# workflows pin (by commit) has a new release. Other ecosystems can go below.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

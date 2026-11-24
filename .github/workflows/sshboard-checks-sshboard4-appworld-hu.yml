@@ -1,0 +1,33 @@
+# Written by sshboard: runs the checks of sshboard4.appworld.hu (server: sshboard) on
+# pull requests into main, without secrets and without deploying.
+name: "sshboard checks: sshboard4.appworld.hu"
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: "sshboard-checks-sshboard4-appworld-hu-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.5"
+          tools: composer
+          coverage: none
+      - name: "Függőségek (Composer)"
+        shell: bash
+        run: |
+          composer install --no-interaction --no-progress --prefer-dist
+      - name: "PHP-tesztek (composer run-script test)"
+        shell: bash
+        run: |
+          composer run-script test

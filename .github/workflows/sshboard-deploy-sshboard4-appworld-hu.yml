@@ -1,0 +1,111 @@
+# Written by sshboard: deploys sshboard4.appworld.hu (server: sshboard) on every push to
+# main. The secrets SSHBOARD_SSHBOARD4_APPWORLD_HU_SSH_KEY, SSHBOARD_SSHBOARD4_APPWORLD_HU_KNOWN_HOSTS and
+# SSHBOARD_SSHBOARD4_APPWORLD_HU_REMOTE are set by sshboard (Deploy tab → GitHub Actions…).
+name: "sshboard deploy: sshboard4.appworld.hu"
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: "sshboard-deploy-sshboard4-appworld-hu"
+  cancel-in-progress: false
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.5"
+          tools: composer
+          coverage: none
+      - name: "Függőségek (Composer)"
+        shell: bash
+        run: |
+          composer install --no-interaction --no-progress --prefer-dist
+      - name: "PHP-tesztek (composer run-script test)"
+        shell: bash
+        run: |
+          composer run-script test
+  deploy:
+    needs: [checks]
+    if: "github.ref == 'refs/heads/main' && !github.event.repository.fork"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Deploy
+        shell: bash
+        env:
+          SSHBOARD_SSH_KEY: ${{ secrets.SSHBOARD_SSHBOARD4_APPWORLD_HU_SSH_KEY }}
+          SSHBOARD_KNOWN_HOSTS: ${{ secrets.SSHBOARD_SSHBOARD4_APPWORLD_HU_KNOWN_HOSTS }}
+          SSHBOARD_REMOTE: ${{ secrets.SSHBOARD_SSHBOARD4_APPWORLD_HU_REMOTE }}
+        run: |
+          # Pushes this commit to the server's deploy repository (sshboard, M6). The server
+          # builds and switches the release; its output shows below as remote: lines.
+          set -euo pipefail
+          missing=()
+          [ -n "${SSHBOARD_SSH_KEY:-}" ] || missing+=(SSHBOARD_SSHBOARD4_APPWORLD_HU_SSH_KEY)
+          [ -n "${SSHBOARD_KNOWN_HOSTS:-}" ] || missing+=(SSHBOARD_SSHBOARD4_APPWORLD_HU_KNOWN_HOSTS)
+          [ -n "${SSHBOARD_REMOTE:-}" ] || missing+=(SSHBOARD_SSHBOARD4_APPWORLD_HU_REMOTE)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error title=sshboard::Hiányzó secret: ${missing[*]} – állítsd be az sshboardban (Deploy fül → GitHub Actions…)."
+            exit 1
+          fi
+          # The server's address stays out of the log.
+          host=${SSHBOARD_REMOTE#ssh://}
+          host=${host#*@}
+          host=${host%%/*}
+          host=${host%:*}
+          echo "::add-mask::$host"
+          dir="$RUNNER_TEMP/sshboard"
+          umask 077
+          rm -rf "$dir"
+          mkdir -p "$dir"
+          printf '%s\n' "$SSHBOARD_SSH_KEY" | tr -d '\r' > "$dir/key"
+          printf '%s\n' "$SSHBOARD_KNOWN_HOSTS" | tr -d '\r' > "$dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -F /dev/null -i '$dir/key' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$dir/known_hosts' -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias=sshboard -o CheckHostIP=no -o UpdateHostKeys=no -o ConnectTimeout=30 -o ServerAliveInterval=30"
+          set +e
+          git -c core.hooksPath=/dev/null push --force "$SSHBOARD_REMOTE" "$GITHUB_SHA:refs/heads/main" 2>&1 | tee "$dir/push.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            own=$(sed -n 's/^\(remote: \)\{0,1\}sshboard\(-deploy\)\{0,1\}: //p' "$dir/push.log" | tail -n 1)
+            own=${own//%/%25}
+            if grep "Host key verification failed" "$dir/push.log" >/dev/null; then
+              echo "::error title=sshboard::A szerver host key-e nem az, amit az sshboard tárol (újratelepítették, vagy más válaszol a nevében). Ellenőrizd az sshboardban, és állítsd be újra a secreteket."
+            elif grep "Permission denied (publickey" "$dir/push.log" >/dev/null; then
+              echo "::error title=sshboard::A szerver nem fogadta el a CI-kulcsot (lecserélted, visszavontad, vagy hibás a secret). Az sshboardban: Deploy fül → GitHub Actions… → Kulcscsere."
+            elif grep "Could not resolve hostname" "$dir/push.log" >/dev/null; then
+              echo "::error title=sshboard::A szerver neve a GitHubon nem oldható fel (helyi név?). Adj meg nyilvános címet az sshboardban."
+            elif grep -E "timed out|No route to host|Network is unreachable" "$dir/push.log" >/dev/null; then
+              echo "::error title=sshboard::A GitHub gépe nem éri el a szervert: az SSH-portnak az internet felől nyitva kell lennie (szolgáltatói tűzfal, ufw, IP-szűrés, belső cím)."
+            elif grep "Connection refused" "$dir/push.log" >/dev/null; then
+              echo "::error title=sshboard::A szerver elutasította a kapcsolatot: rossz port, nem fut az sshd, vagy a fail2ban kitiltotta a futtató címét (1 óra)."
+            elif [ -n "$own" ]; then
+              echo "::error title=sshboard::$own"
+            elif grep "pre-receive hook declined" "$dir/push.log" >/dev/null; then
+              echo "::error title=sshboard::A szerver elutasította a deployt (build vagy indulás); a részletek a remote: sorokban. Az oldal a korábbi release-en maradt."
+            else
+              echo "::error title=sshboard::A push nem sikerült (git: $status); a részletek fent."
+            fi
+            exit "$status"
+          fi
+          if grep "Everything up-to-date" "$dir/push.log" >/dev/null; then
+            echo "::notice title=sshboard::A szerveren már ez a commit van, nem történt deploy. Újraépíteni vagy visszaállni az sshboard Deploy fülén lehet."
+          else
+            release=$(sed -n 's/^remote: Élesítve: \([^ ]*\).*/\1/p' "$dir/push.log" | tail -n 1)
+            echo "### sshboard: élesítve $release" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/sshboard"
